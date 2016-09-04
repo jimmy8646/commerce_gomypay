@@ -1,0 +1,237 @@
+<?php
+/**
+ * Implements hook_variable_group_info().
+ */
+ function commerce_gomypay_variable_group_info()
+ {
+     $groups['commerce_gomypay'] = array(
+     'title' => t('GomyPay金流'),
+     'description' => t('GomyPay第三方支付平台'),
+   );
+
+     return $groups;
+ }
+
+ /**
+  * Implements hook_variable_info().
+  */
+ function commerce_gomypay_variable_info()
+ {
+     $variables['gomypay_status'] = array(
+     'name' => 'gomypay_status',
+     'title' => t('GomyPay第三方支付系統狀態'),
+     'description' => t('請選擇GomyPay第三方支付系統狀態。例如：測試環境DEV,正式環境Production'),
+     'default' => 'dev',
+     'type' => 'string',
+     'group' => 'commerce_gomypay',
+     'token' => true,
+     'element' => array(
+       '#type' => 'radios',
+       '#options' => array(
+         'dev' => t('測試環境'),
+         'production' => t('正式環境'),
+       ),
+     ),
+   );
+
+     return $variables;
+ }
+/**
+ * response.
+ */
+function commerce_gomypay_menu()
+{
+    $items = array();
+
+    $items['checkout/%/gomypay_response'] = array(
+    'title' => t('結果回傳'),
+    'page callback' => 'gomypay_return_page',
+    'type' => MENU_NORMAL_ITEM,
+    'access callback' => true,
+  );
+
+    return $items;
+}
+/**
+ * Implements hook_commerce_payment_method_info().
+ */
+function commerce_gomypay_commerce_payment_method_info()
+{
+    $payment_methods = array();
+
+    $payment_methods['gomypay_credit_card'] = array(
+    'base' => 'gomypay_credit_card',
+    'title' => t('GomyPay第三方支付平台'),
+    'description' => t('GomyPay第三方支付平台'),
+    'short_title' => t('GomyPay支付平台'),
+    'display_title' => t('信用卡'),
+    'terminal' => false,
+    'offsite' => true,
+    'offsite_autoredirect' => true,
+    'active' => true,
+  );
+
+    return $payment_methods;
+}
+
+/**
+ * Payment method callback: submit form.
+ */
+function gomypay_credit_card_submit_form($payment_method, $pane_values, $checkout_pane, $order)
+{
+    $form = array();
+    $form['gomypay_information'] = array(
+    '#markup' => '<span class="commerce-esun-info">'.t('按下一步，前往GomyPay第三方支付平台支付此筆訂單。').'</span>',
+  );
+
+    return $form;
+}
+
+/**
+ * Payment method callback: redirect form, a wrapper around the module's general
+ *   use function for building a WPS form.
+ */
+function gomypay_credit_card_redirect_form($form, &$form_state, $order, $payment_method)
+{
+    // Check 所有的參數是否有填寫
+
+  return gomypay_credit_card_order_form($form, $form_state, $order, $payment_method);
+}
+
+function gomypay_credit_card_order_form($form, &$form_state, $order, $payment_method)
+{
+    //load gomypay_config
+    invoke_gomypay_module();
+    $gomypay_status = variable_get('gomypay_status', 'dev');
+    if ($gomypay_status == 'dev') {
+        $actionurl = GOMYPAY_TEST_URL;
+    } elseif ($gomypay_status == 'production') {
+        $actionurl = GOMYPAY_PRO_URL;
+    }
+    $charge = commerce_order_calculate_total($order);
+    $amount = $order->commerce_order_total['und'][0]['amount'];
+    $price = commerce_currency_amount_to_decimal($amount, 'TWD');
+    $remote_id = date('YmdHis').$order->order_id;
+
+//建立Payment紀錄
+$transaction = commerce_payment_transaction_new('gomypay_credit_card', $order->order_id);
+    $transaction->instance_id = $payment_method['instance_id'];
+    $transaction->amount = $order->commerce_order_total['und'][0]['amount'];
+    $transaction->currency_code = $order->commerce_order_total['und'][0]['currency_code'];
+    $transaction->remote_id = $remote_id;
+    $transaction->status = COMMERCE_PAYMENT_STATUS_PENDING;
+    commerce_payment_transaction_save($transaction);
+
+    $data = gomypay_environment_argument($payment_method, $order, $price, $remote_id);
+
+    $form['#action'] = $actionurl;
+    foreach ($data as $name => $value) {
+        if (!empty($value)) {
+            $form[$name] = array('#type' => 'hidden', '#value' => $value);
+        }
+    }
+    $form['submit'] = array(
+      '#type' => 'submit',
+      '#value' => t('送出前往Gomypay第三方支付平台'),
+    );
+
+    return $form;
+}
+function gomypay_environment_argument($payment_method, $order, $price, $remote_id)
+{
+
+    global $base_url;
+    $user=user_load($order->uid);
+    $e_orderno = $remote_id;//訂單獨立編號
+    $e_url = $base_url.'/checkout/'.$order->order_id.'/gomypay_response';
+    $gomypay_status = variable_get('gomypay_status', 'dev');
+    if ($gomypay_status == 'dev') {
+        $e_no = GOMYPAY_DEV_E_NO;//測試商店代號
+        $e_key = GOMYPAY_DEV_KEY;//測試交易驗證密碼
+    } elseif ($gomypay_status == 'production') {
+        $e_no = GOMYPAY_E_NO;//正式商店代號
+        $e_key = GOMYPAY_KEY;//正式交易驗證密碼
+    }
+    $e_storename = GOMYPAY_E_STORENAME;//商店名稱
+    $e_money = $price;
+    $e_name = $user->field_fullname['und'][0]['value'];
+    $e_telm = $user->field_telm['und'][0]['value'];
+    $e_email = $user->mail;
+    $e_info = '恆生課程購買';
+    $str_check = md5("$e_orderno"."$e_no"."$e_money"."$e_key");//訂單編號+商店代號+交易金額+驗證密碼
+    $data = array(
+        'e_orderno' => $e_orderno,
+        'e_url' => $e_url,
+        'e_no' => $e_no,
+        'e_storename' => $e_storename,
+        'e_Lang' => 'UTF-8',
+        'e_money' => $e_money,
+        'str_check' => $str_check,
+        'e_name' => $e_name,
+        'e_telm' => $e_telm,
+        'e_email' => $e_email,
+        'e_info' => $e_info,
+    );
+
+    return $data;
+}
+/**
+ * response page.
+ */
+function gomypay_return_page()
+{
+    invoke_gomypay_module();
+
+    global $user;
+    $uid = $user->uid;
+    extract($_POST);
+    $gomypay_status = variable_get('gomypay_status', 'dev');
+    if ($gomypay_status == 'dev') {
+        $my_e_no = GOMYPAY_DEV_E_NO;//測試商店代號
+        $my_e_key = GOMYPAY_DEV_KEY;//測試交易驗證密碼
+    } elseif ($gomypay_status == 'production') {
+        $my_e_no = GOMYPAY_E_NO;//正式商店代號
+        $my_e_key = GOMYPAY_KEY;//正式交易驗證密碼
+    }
+    $my_check = md5("$str_ok"."$e_orderno"."$my_e_no"."$e_money"."$str_no"."$my_e_key");
+    if ($my_check != $str_check) {
+        $return_message = t('驗證密碼錯誤或是資料遭到竄改');
+        echo $return_message;
+        drupal_exit();
+    }
+    //取得訂單id
+    $order_id = substr($e_orderno, 14);
+    # 更新payment transaction還有訂單狀態
+    $condition = array(
+      'order_id' => $order_id,
+      'remote_id' => $e_orderno,
+    );
+    $payment_array = commerce_payment_transaction_load_multiple(array(), $condition, false);
+    $order = commerce_order_load($order_id);
+    foreach($payment_array as $key => $value){
+      $transaction=$value;
+      if($str_ok=='1'){
+        $transaction->message=$bstr_msg;//銀行回傳交易訊息
+        $transaction->status =COMMERCE_PAYMENT_STATUS_SUCCESS;
+        commerce_checkout_complete($order);
+      }
+      else{
+        $transaction->message=$bstr_msg;//銀行回傳交易訊息
+        $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+      }
+      commerce_payment_transaction_save($transaction);
+    }
+    drupal_goto(url('checkout/'.$order_id,array('absolute'=>TRUE)));
+
+}
+// Invoke gomypay_config
+function invoke_gomypay_module()
+{
+    $module_list = array('gomypay_config');
+    foreach ($module_list as $module_name) {
+        $include_result = module_load_include('php', 'commerce_gomypay', 'lib/'.$module_name);
+        if (!$include_result) {
+            throw new Exception(t('Commerce GomyPay Module missed.'));
+        }
+    }
+}
